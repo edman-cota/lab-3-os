@@ -2,10 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#include <omp.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/syscall.h>
 
 #define SIZE 9
 #define SUBGRID_SIZE 3
@@ -26,21 +27,8 @@ int isValid(int *array)
     return 1;
 }
 
-// Función para verificar todas las filas
-int checkRows()
-{
-    for (int i = 0; i < SIZE; i++)
-    {
-        if (!isValid(sudoku[i]))
-        {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-// Función para verificar todas las columnas
-int checkColumns()
+// Función para verificar todas las columnas (ejecutada por el hilo)
+void *checkColumnsThread(void *arg)
 {
     int column[SIZE];
     for (int j = 0; j < SIZE; j++)
@@ -50,6 +38,19 @@ int checkColumns()
             column[i] = sudoku[i][j];
         }
         if (!isValid(column))
+        {
+            pthread_exit((void *)0); // Sudoku no válido
+        }
+    }
+    pthread_exit((void *)1); // Sudoku válido
+}
+
+// Función para verificar todas las filas
+int checkRows()
+{
+    for (int i = 0; i < SIZE; i++)
+    {
+        if (!isValid(sudoku[i]))
         {
             return 0;
         }
@@ -82,7 +83,6 @@ int checkSubgrids()
     return 1;
 }
 
-// Función principal
 int main(int argc, char *argv[])
 {
     if (argc != 2)
@@ -121,18 +121,90 @@ int main(int argc, char *argv[])
     munmap(file_content, 81);
     close(fd);
 
-    // Validar el Sudoku
-    int validRows = checkRows();
-    int validColumns = checkColumns();
-    int validSubgrids = checkSubgrids();
+    // Obtener el número de proceso padre
+    pid_t parent_pid = getpid();
 
-    if (validRows && validColumns && validSubgrids)
+    // Crear un proceso hijo
+    pid_t child_pid = fork();
+
+    if (child_pid == 0)
     {
-        printf("El Sudoku es válido.\n");
+        // Proceso hijo
+        char parent_pid_str[20];
+        snprintf(parent_pid_str, sizeof(parent_pid_str), "%d", parent_pid);
+
+        // Ejecutar el comando ps
+        execlp("ps", "ps", "-p", parent_pid_str, "-lLf", NULL);
+
+        // Si execlp falla
+        perror("Error al ejecutar execlp");
+        exit(1);
+    }
+    else if (child_pid > 0)
+    {
+        // Proceso padre
+
+        // Crear un hilo para verificar las columnas
+        pthread_t column_thread;
+        pthread_create(&column_thread, NULL, checkColumnsThread, NULL);
+
+        // Esperar a que el hilo termine
+        void *thread_result;
+        pthread_join(column_thread, &thread_result);
+
+        // Mostrar el ID del hilo en ejecución
+        printf("ID del hilo en ejecución: %ld\n", syscall(SYS_gettid));
+
+        // Esperar a que el proceso hijo termine
+        wait(NULL);
+
+        // Verificar las filas
+        int validRows = checkRows();
+
+        // Verificar las subcuadrículas
+        int validSubgrids = checkSubgrids();
+
+        // Determinar si el Sudoku es válido
+        if ((intptr_t)thread_result && validRows && validSubgrids)
+        {
+            printf("El Sudoku es válido.\n");
+        }
+        else
+        {
+            printf("El Sudoku no es válido.\n");
+        }
+
+        // Segundo fork para comparar LWP's
+        pid_t second_child_pid = fork();
+
+        if (second_child_pid == 0)
+        {
+            // Segundo proceso hijo
+            char parent_pid_str[20];
+            snprintf(parent_pid_str, sizeof(parent_pid_str), "%d", parent_pid);
+
+            // Ejecutar el comando ps
+            execlp("ps", "ps", "-p", parent_pid_str, "-lLf", NULL);
+
+            // Si execlp falla
+            perror("Error al ejecutar execlp");
+            exit(1);
+        }
+        else if (second_child_pid > 0)
+        {
+            // Esperar al segundo hijo
+            wait(NULL);
+        }
+        else
+        {
+            perror("Error en el segundo fork");
+            return 1;
+        }
     }
     else
     {
-        printf("El Sudoku no es válido.\n");
+        perror("Error en el fork");
+        return 1;
     }
 
     return 0;
